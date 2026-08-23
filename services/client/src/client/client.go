@@ -2,6 +2,7 @@ package client
 
 import (
 	"bufio"
+	"encoding/binary"
 	"net"
 	"os"
 	"time"
@@ -11,7 +12,8 @@ import (
 )
 
 const CONNECTION_ATTEMPTS_MAX = 3
-const CONNECTION_ATTEMPS_DELAY_MS = 200
+const CONNECTION_ATTEMPS_DELAY_MS = 700
+const MESSAGE_HEADER_SIZE = 2
 
 const ECHO_CLIENT_BUFFER_SIZE = 512
 const ECHO_CLIENT_MESSAGE_AMOUNT = 3
@@ -91,23 +93,29 @@ func (client *Client) Run() error {
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		if err := safe_socket.SendAll(client.conn, []byte(line+"\n")); err != nil {
+		frame := binary.BigEndian.AppendUint16(nil, uint16(len(line)))
+		frame = append(frame, []byte(line)...)
+
+		if err := safe_socket.SendAll(client.conn, frame); err != nil {
 			logger.Error("send-bet", logger.Fail, messageArgs...)
 			return err
 		}
 
-		responseBuffer, err := safe_socket.RecvAll(client.conn, ECHO_CLIENT_BUFFER_SIZE)
+		headerBuffer, err := safe_socket.RecvAll(client.conn, MESSAGE_HEADER_SIZE)
+		if err != nil {
+			logger.Error("recv-response-header", logger.Fail, messageArgs...)
+			return err
+		}
+
+		responseLength := binary.BigEndian.Uint16(headerBuffer)
+		responseBuffer, err := safe_socket.RecvAll(client.conn, int(responseLength))
 		if err != nil {
 			logger.Error("recv-response", logger.Fail, messageArgs...)
 			return err
 		}
 
-		end := len(responseBuffer)
-		for end > 0 && responseBuffer[end-1] == 0 {
-			end--
-		}
-
-		if _, err := outputFile.Write(responseBuffer[:end]); err != nil {
+		response := append(responseBuffer, '\n')
+		if _, err := outputFile.Write(response); err != nil {
 			logger.Error("persist-response", logger.Fail, messageArgs...)
 			return err
 		}
