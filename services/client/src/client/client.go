@@ -1,7 +1,9 @@
 package client
 
 import (
+	"bufio"
 	"net"
+	"os"
 	"time"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
@@ -19,6 +21,8 @@ type ClientConfig struct {
 	ServerHost string
 	ServerPort string
 	AgencyId   string
+	InputFile  string
+	OutputFile string
 }
 
 type Client struct {
@@ -59,17 +63,36 @@ func connectToServer(host, port string) (net.Conn, error) {
 }
 
 func (client *Client) Run() error {
-	const mainAction = "test-echo-server"
+	const mainAction = "process-bets"
 	defer client.conn.Close()
 
-	for messageId := range ECHO_CLIENT_MESSAGE_AMOUNT {
+	inputFile, err := os.Open(client.config.InputFile)
+	if err != nil {
+		logger.Error("open-input-file", logger.Fail, "err", err)
+		return err
+	}
+	defer inputFile.Close()
+
+	outputFile, err := os.Create(client.config.OutputFile)
+	if err != nil {
+		logger.Error("open-output-file", logger.Fail, "err", err)
+		return err
+	}
+	defer outputFile.Close()
+
+	scanner := bufio.NewScanner(inputFile)
+
+	for messageId := 0; scanner.Scan(); messageId++ {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		clientMessage := client.config.AgencyId
-
-		if err := safe_socket.SendAll(client.conn, []byte(clientMessage)); err != nil {
-			logger.Error("send-message", logger.Fail, messageArgs...)
+		if err := safe_socket.SendAll(client.conn, []byte(line+"\n")); err != nil {
+			logger.Error("send-bet", logger.Fail, messageArgs...)
 			return err
 		}
 
@@ -79,14 +102,22 @@ func (client *Client) Run() error {
 			return err
 		}
 
-		if string(responseBuffer) == clientMessage {
-			logger.Error("check-response", logger.Fail, messageArgs...)
-			return err
+		end := len(responseBuffer)
+		for end > 0 && responseBuffer[end-1] == 0 {
+			end--
 		}
 
-		time.Sleep(ECHO_CLIENT_MESSAGE_DELAY_MS * time.Millisecond)
+		if _, err := outputFile.Write(responseBuffer[:end]); err != nil {
+			logger.Error("persist-response", logger.Fail, messageArgs...)
+			return err
+		}
 	}
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
 
+	if err := scanner.Err(); err != nil {
+		logger.Error("scan-input-file", logger.Fail, "err", err)
+		return err
+	}
+
+	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
 	return nil
 }
