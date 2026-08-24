@@ -1,0 +1,7 @@
+# Bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Otros artefactos comunes de compilación
+*.so
