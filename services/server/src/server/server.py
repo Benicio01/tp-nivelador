@@ -1,51 +1,74 @@
 import socket
 import logger
+import protocol
 import safe_socket
-
-_MESSAGE_HEADER_SIZE = 2
+from lottery import Lottery, Bet
 
 
 class Server:
-    def __init__(self, server_host: str, server_port: int) -> None:
+    def __init__(self, server_host: str, server_port: int, lottery: Lottery) -> None:
         self.server_host = server_host
         self.server_port = server_port
+        self.lottery = lottery
 
     def _handle_client(self, client_socket):
         action = "handle-client"
-        message_amount = 0
+        bets = []
         try:
             logger.info(action, logger.LogResult.in_progress)
             while True:
-                header = safe_socket.recv_all(
-                    client_socket, _MESSAGE_HEADER_SIZE
+                payload = protocol.read_frame(client_socket)
+                if payload is None:
+                    break
+                columns = protocol.unmarshal_bet(payload)
+                bet = Bet(
+                    int(columns[0]),
+                    columns[1],
+                    columns[2],
+                    int(columns[3]),
+                    columns[4],
+                    int(columns[5]),
                 )
-                if not header:
-                    logger.info(
-                        action,
-                        logger.LogResult.success,
-                        "messages-amount",
-                        message_amount,
-                    )
-                    return
-                if len(header) < _MESSAGE_HEADER_SIZE:
-                    raise ConnectionError("truncated message header")
-                payload_size = int.from_bytes(header, "big")
-                payload = safe_socket.recv_all(
-                    client_socket, payload_size
-                )
-                if len(payload) < payload_size:
-                    raise ConnectionError("truncated message payload")
-                message_amount += 1
-                safe_socket.send_all(client_socket, header + payload)
+                bets.append(bet)
+            if not bets:
+                return
+
+            agency_id = bets[0].agency_id
+            self.lottery.store_bets(bets)
+            self._send_winners(client_socket, agency_id)
+            logger.info(
+                action,
+                logger.LogResult.success,
+                "messages-amount",
+                len(bets),
+                "agency-id",
+                agency_id,
+            )
         except Exception as e:
             logger.error(
                 action,
                 logger.LogResult.fail,
                 "messages-amount",
-                message_amount,
+                len(bets),
                 "err",
                 e,
             )
+
+    def _send_winners(self, client_socket, agency_id):
+        for bet in self.lottery.load_bets():
+            if bet.agency_id == agency_id and self.lottery.has_won(bet):
+                payload = protocol.marshal_bet(
+                    bet.agency_id,
+                    [
+                        bet.first_name,
+                        bet.last_name,
+                        str(bet.document),
+                        bet.birthdate,
+                        str(bet.number),
+                    ],
+                )
+                frame = protocol.encode_frame(payload)
+                safe_socket.send_all(client_socket, frame)
 
     def run(self):
         action = "accept-connection"

@@ -1,23 +1,23 @@
 package client
 
 import (
-	"bufio"
-	"encoding/binary"
+	"encoding/csv"
+	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/protocol"
 
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/logger"
 	"github.com/7574-sistemas-distribuidos/tp-nivelador/src/safe_socket"
 )
 
 const CONNECTION_ATTEMPTS_MAX = 3
-const CONNECTION_ATTEMPS_DELAY_MS = 700
-const MESSAGE_HEADER_SIZE = 2
-
-const ECHO_CLIENT_BUFFER_SIZE = 512
-const ECHO_CLIENT_MESSAGE_AMOUNT = 3
-const ECHO_CLIENT_MESSAGE_DELAY_MS = 1000
+const CONNECTION_ATTEMPS_DELAY_MS = 200
 
 type ClientConfig struct {
 	ServerHost string
@@ -82,50 +82,68 @@ func (client *Client) Run() error {
 	}
 	defer outputFile.Close()
 
-	scanner := bufio.NewScanner(inputFile)
+	reader := csv.NewReader(inputFile)
+	messageId := 0
+	for {
+		record, err := reader.Read()
 
-	for messageId := 0; scanner.Scan(); messageId++ {
-		line := scanner.Text()
-		if line == "" {
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			logger.Error("read-input-file", logger.Fail, "err", err)
+			return err
+		}
+		if len(record) == 0 {
 			continue
 		}
 
 		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		frame := binary.BigEndian.AppendUint16(nil, uint16(len(line)))
-		frame = append(frame, []byte(line)...)
-
+		payload := protocol.MarshalBet(client.config.AgencyId, record)
+		frame := protocol.EncodeFrame(payload)
 		if err := safe_socket.SendAll(client.conn, frame); err != nil {
 			logger.Error("send-bet", logger.Fail, messageArgs...)
 			return err
 		}
 
-		headerBuffer, err := safe_socket.RecvAll(client.conn, MESSAGE_HEADER_SIZE)
-		if err != nil {
-			logger.Error("recv-response-header", logger.Fail, messageArgs...)
-			return err
-		}
-
-		responseLength := binary.BigEndian.Uint16(headerBuffer)
-		responseBuffer, err := safe_socket.RecvAll(client.conn, int(responseLength))
-		if err != nil {
-			logger.Error("recv-response", logger.Fail, messageArgs...)
-			return err
-		}
-
-		response := append(responseBuffer, '\n')
-		if _, err := outputFile.Write(response); err != nil {
-			logger.Error("persist-response", logger.Fail, messageArgs...)
-			return err
-		}
+		messageId++
 	}
 
-	if err := scanner.Err(); err != nil {
-		logger.Error("scan-input-file", logger.Fail, "err", err)
+	if err := client.closeWrite(); err != nil {
 		return err
 	}
 
+	for {
+		payload, err := protocol.ReadFrame(client.conn)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			logger.Error("recv-winner", logger.Fail, "err", err)
+			return err
+		}
+
+		fields := protocol.UnmarshalBet(payload)
+		if _, err := outputFile.WriteString(strings.Join(fields[1:], ",") + "\n"); err != nil {
+			logger.Error("persist-winner", logger.Fail, "err", err)
+			return err
+		}
+	}
+
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+	return nil
+}
+
+func (client *Client) closeWrite() error {
+	tcpConn, ok := client.conn.(*net.TCPConn)
+	if !ok {
+		return fmt.Errorf("connection is not *net.TCPConn")
+	}
+	if err := tcpConn.CloseWrite(); err != nil {
+		logger.Error("close-write", logger.Fail, "err", err)
+		return err
+	}
 	return nil
 }
