@@ -1,13 +1,11 @@
 import socket
 
-def recv_all(socket: socket.socket, size, allow_eof=False):
+def recv_all(socket: socket.socket, size):
     data = bytearray()
     while len(data) < size:
         chunk = socket.recv(size - len(data))
         if not chunk:
-            if allow_eof:
-                return bytes(data)
-            continue
+            return bytes(data)
         data += chunk
     return bytes(data)
 

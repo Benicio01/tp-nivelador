@@ -17,7 +17,7 @@ class Server:
             logger.info(action, logger.LogResult.in_progress)
             while True:
                 header = safe_socket.recv_all(
-                    client_socket, _MESSAGE_HEADER_SIZE, allow_eof=True
+                    client_socket, _MESSAGE_HEADER_SIZE
                 )
                 if not header:
                     logger.info(
@@ -31,7 +31,7 @@ class Server:
                     raise ConnectionError("truncated message header")
                 payload_size = int.from_bytes(header, "big")
                 payload = safe_socket.recv_all(
-                    client_socket, payload_size, allow_eof=True
+                    client_socket, payload_size
                 )
                 if len(payload) < payload_size:
                     raise ConnectionError("truncated message payload")
