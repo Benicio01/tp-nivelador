@@ -14,27 +14,35 @@ class Server:
     def _handle_client(self, client_socket):
         action = "handle-client"
         bets = []
+        agency_id = None
         try:
             logger.info(action, logger.LogResult.in_progress)
             while True:
                 payload = protocol.read_frame(client_socket)
                 if payload is None:
                     break
-                columns = protocol.unmarshal_bet(payload)
-                bet = Bet(
-                    int(columns[0]),
-                    columns[1],
-                    columns[2],
-                    int(columns[3]),
-                    columns[4],
-                    int(columns[5]),
-                )
-                bets.append(bet)
+                batch_columns = protocol.unmarshal_batch(payload)
+                batch_bets = []
+                for columns in batch_columns:
+                    bet = Bet(
+                        int(columns[0]),
+                        columns[1],
+                        columns[2],
+                        int(columns[3]),
+                        columns[4],
+                        int(columns[5]),
+                    )
+                    batch_bets.append(bet)
+                if not batch_bets:
+                    continue
+                self.lottery.store_bets(batch_bets)
+                if agency_id is None:
+                    agency_id = batch_bets[0].agency_id
+                self._ack_batch(client_socket)
+                bets.extend(batch_bets)
             if not bets:
                 return
 
-            agency_id = bets[0].agency_id
-            self.lottery.store_bets(bets)
             self._send_winners(client_socket, agency_id)
             logger.info(
                 action,
@@ -53,6 +61,10 @@ class Server:
                 "err",
                 e,
             )
+
+    def _ack_batch(self, client_socket):
+        frame = protocol.encode_frame(protocol.ACK)
+        safe_socket.send_all(client_socket, frame)
 
     def _send_winners(self, client_socket, agency_id):
         for bet in self.lottery.load_bets():

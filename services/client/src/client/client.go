@@ -25,6 +25,7 @@ type ClientConfig struct {
 	AgencyId   string
 	InputFile  string
 	OutputFile string
+	BatchSize  int
 }
 
 type Client struct {
@@ -83,6 +84,12 @@ func (client *Client) Run() error {
 	defer outputFile.Close()
 
 	reader := csv.NewReader(inputFile)
+	batchSize := client.config.BatchSize
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+
+	batch := make([][]string, 0, batchSize)
 	messageId := 0
 	for {
 		record, err := reader.Read()
@@ -98,17 +105,45 @@ func (client *Client) Run() error {
 			continue
 		}
 
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId}
+		batch = append(batch, record)
+		if len(batch) < batchSize {
+			continue
+		}
+
+		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
 		logger.Info(mainAction, logger.InProgress, messageArgs...)
 
-		payload := protocol.MarshalBet(client.config.AgencyId, record)
+		payload := protocol.MarshalBatch(client.config.AgencyId, batch)
 		frame := protocol.EncodeFrame(payload)
 		if err := safe_socket.SendAll(client.conn, frame); err != nil {
 			logger.Error("send-bet", logger.Fail, messageArgs...)
 			return err
 		}
 
+		if err := client.awaitAck(); err != nil {
+			logger.Error("await-ack", logger.Fail, messageArgs...)
+			return err
+		}
+
+		batch = batch[:0]
 		messageId++
+	}
+
+	if len(batch) > 0 {
+		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
+		logger.Info(mainAction, logger.InProgress, messageArgs...)
+
+		payload := protocol.MarshalBatch(client.config.AgencyId, batch)
+		frame := protocol.EncodeFrame(payload)
+		if err := safe_socket.SendAll(client.conn, frame); err != nil {
+			logger.Error("send-bet", logger.Fail, messageArgs...)
+			return err
+		}
+
+		if err := client.awaitAck(); err != nil {
+			logger.Error("await-ack", logger.Fail, messageArgs...)
+			return err
+		}
 	}
 
 	if err := client.closeWrite(); err != nil {
@@ -133,6 +168,17 @@ func (client *Client) Run() error {
 	}
 
 	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+	return nil
+}
+
+func (client *Client) awaitAck() error {
+	payload, err := protocol.ReadFrame(client.conn)
+	if err != nil {
+		return err
+	}
+	if string(payload) != string(protocol.ACK_MARKER) {
+		return fmt.Errorf("unexpected ack payload: %q", payload)
+	}
 	return nil
 }
 

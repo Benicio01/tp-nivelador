@@ -15,7 +15,7 @@ que ya es un mensaje válido por sí mismo. Los `\n` quedan fuera del protocolo:
 son formato del CSV y se agregan únicamente al persistir en `OUTPUT_FILE`.
 
 Definiciones menores: 2 bytes alcanzan para 64 KiB por mensaje, suficiente
-para una apuesta y con margen para los lotes del ejercicio 6 sin tocar el
+para una apuesta y con margen para los batchs del ejercicio 6 sin tocar el
 transporte; se usa big-endian, codificado con
 `encoding/binary` en Go e `int.from_bytes(h, "big")` en Python.
 
@@ -55,3 +55,37 @@ de cada ganador (sin `agency_id`).
 - protocolo: serialización/deserialización de apuestas y armado de frames;
 - dominio: `Bet` y `Lottery` (`src_frozen`, sin modificar);
 - orquestación: `client.go`/`server.py`
+
+
+## Protocolo (Ej 6)
+
+Se agrega procesamiento por batchs (_batches_): el cliente agrupa `BATCH_SIZE`
+apuestas en un único mensaje en lugar de enviarlas una por una.
+
+### Formato de los mensajes
+
+El header de 2 bytes se mantiene intacto, pero el payload de un frame puede
+contener ahora varias apuestas. Cada apuesta se serializa igual que en el Ej 5
+(fila CSV de 6 columnas), y las apuestas de un mismo batch se concatenan
+separadas por `\n`:
+
+El `\n` funciona como separador entre apuestas del batch porque los campos del
+CSV no contienen comas ni saltos de línea. El `batch` viaja dentro de
+un solo frame con longitud explícita, por lo que `send_all`/`recv_all` del
+Ej 4 garantizan que se transfiere entero o se detecta el truncamiento — el
+batch se procesa "todo o nada".
+
+### Confirmación por batch (ACK)
+
+Cambia la sincronización respecto del Ej 5 (donde el cliente enviaba todas las
+apuestas y luego esperaba). Ahora el intercambio es request/response por batch:
+
+1. El cliente envía un batch.
+2. El servidor lee el frame completo, procesa **todas** las apuestas del batch
+   y las persiste con `store_bets`.
+3. Si el batch se procesó correctamente, responde un ACK (`OK`).
+4. El cliente, tras recibir el ACK, recién envía el siguiente batch.
+5. Al terminar los batches, el cliente envía el **batch residual** (las apuestas
+   que no alcanzaron a completar un batch) y cierra su lado de escritura.
+6. El servidor calcula los ganadores y responde **un mensaje por ganador**
+   y el cliente los persiste en `OUTPUT_FILE` .
