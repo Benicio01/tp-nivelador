@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"encoding/binary"
 	"io"
 	"strings"
 
@@ -14,8 +13,18 @@ const BATCH_DEFAULT_SIZE = 16
 
 var ACK_MARKER = []byte("OK")
 
+func putUint16BigEndian(b []byte, v uint16) {
+	b[0] = byte(v >> 8)
+	b[1] = byte(v)
+}
+
+func uint16BigEndian(b []byte) uint16 {
+	return uint16(b[0])<<8 | uint16(b[1])
+}
+
 func EncodeFrame(payload []byte) []byte {
-	frame := binary.BigEndian.AppendUint16(nil, uint16(len(payload)))
+	frame := make([]byte, HEADER_SIZE, HEADER_SIZE+len(payload))
+	putUint16BigEndian(frame, uint16(len(payload)))
 	return append(frame, payload...)
 }
 
@@ -27,7 +36,7 @@ func ReadFrame(r io.Reader) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	size := int(binary.BigEndian.Uint16(header))
+	size := int(uint16BigEndian(header))
 	payload, err := safe_socket.RecvAll(r, size)
 	if err != nil {
 		return nil, err

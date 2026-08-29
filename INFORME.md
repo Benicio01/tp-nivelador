@@ -16,8 +16,7 @@ son formato del CSV y se agregan únicamente al persistir en `OUTPUT_FILE`.
 
 Definiciones menores: 2 bytes alcanzan para 64 KiB por mensaje, suficiente
 para una apuesta y con margen para los batchs del ejercicio 6 sin tocar el
-transporte; se usa big-endian, codificado con
-`encoding/binary` en Go e `int.from_bytes(h, "big")` en Python.
+transporte. Se usa big-endian y el header se serializa y deserializa a mano (sin librerías) mediante shifts y operaciones lógicas AND/OR de bits, de forma equivalente en Go y en Python.
 
 La sincronización queda dada íntegramente por el intercambio de mensajes —
 el cliente espera el eco de cada apuesta antes de enviar la siguiente, y el
