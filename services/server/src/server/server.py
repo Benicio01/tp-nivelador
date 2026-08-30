@@ -1,4 +1,6 @@
 import socket
+import threading
+
 import logger
 import protocol
 import safe_socket
@@ -6,17 +8,29 @@ from lottery import Lottery, Bet
 
 
 class Server:
-    def __init__(self, server_host: str, server_port: int, lottery: Lottery) -> None:
+    def __init__(
+        self, server_host: str, server_port: int, lottery: Lottery, agency_quorum_min: int
+    ) -> None:
         self.server_host = server_host
         self.server_port = server_port
         self.lottery = lottery
+        self.agency_quorum_min = agency_quorum_min
+        self._lottery_lock = threading.Lock()
+        self._quorum_barrier = threading.Barrier(agency_quorum_min)
+
+    def _store_bets(self, bets):
+        with self._lottery_lock:
+            self.lottery.store_bets(bets)
+
+    def _load_bets(self):
+        with self._lottery_lock:
+            return list(self.lottery.load_bets())
 
     def _handle_client(self, client_socket):
         action = "handle-client"
         bets = []
         agency_id = None
         try:
-            logger.info(action, logger.LogResult.in_progress)
             while True:
                 payload = protocol.read_frame(client_socket)
                 if payload is None:
@@ -35,52 +49,56 @@ class Server:
                     batch_bets.append(bet)
                 if not batch_bets:
                     continue
-                self.lottery.store_bets(batch_bets)
+                self._store_bets(batch_bets)
                 if agency_id is None:
                     agency_id = batch_bets[0].agency_id
                 self._ack_batch(client_socket)
                 bets.extend(batch_bets)
-            if not bets:
+
+            if agency_id is None:
                 return
 
-            self._send_winners(client_socket, agency_id)
+            self._quorum_barrier.wait()
+
+            for bet in self._load_bets():
+                if bet.agency_id == agency_id and self.lottery.has_won(bet):
+                    self._send_winner(client_socket, bet)
+
             logger.info(
                 action,
                 logger.LogResult.success,
-                "messages-amount",
-                len(bets),
                 "agency-id",
                 agency_id,
+                "messages-amount",
+                len(bets),
             )
         except Exception as e:
             logger.error(
                 action,
                 logger.LogResult.fail,
-                "messages-amount",
-                len(bets),
                 "err",
                 e,
             )
+        finally:
+            client_socket.close()
 
     def _ack_batch(self, client_socket):
         frame = protocol.encode_frame(protocol.ACK)
         safe_socket.send_all(client_socket, frame)
 
-    def _send_winners(self, client_socket, agency_id):
-        for bet in self.lottery.load_bets():
-            if bet.agency_id == agency_id and self.lottery.has_won(bet):
-                payload = protocol.marshal_bet(
-                    bet.agency_id,
-                    [
-                        bet.first_name,
-                        bet.last_name,
-                        str(bet.document),
-                        bet.birthdate,
-                        str(bet.number),
-                    ],
-                )
-                frame = protocol.encode_frame(payload)
-                safe_socket.send_all(client_socket, frame)
+    def _send_winner(self, client_socket, bet):
+        payload = protocol.marshal_bet(
+            bet.agency_id,
+            [
+                bet.first_name,
+                bet.last_name,
+                str(bet.document),
+                bet.birthdate,
+                str(bet.number),
+            ],
+        )
+        frame = protocol.encode_frame(payload)
+        safe_socket.send_all(client_socket, frame)
 
     def run(self):
         action = "accept-connection"
@@ -96,7 +114,9 @@ class Server:
                     raise e
                 logger.info(action, logger.LogResult.success)
 
-                try:
-                    self._handle_client(client_socket)
-                finally:
-                    client_socket.close()
+                worker = threading.Thread(
+                    target=self._handle_client,
+                    args=(client_socket,),
+                    daemon=True,
+                )
+                worker.start()
