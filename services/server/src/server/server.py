@@ -22,13 +22,9 @@ class Server:
         with self._lottery_lock:
             self.lottery.store_bets(bets)
 
-    def _load_bets(self):
-        with self._lottery_lock:
-            return list(self.lottery.load_bets())
-
     def _handle_client(self, client_socket):
         action = "handle-client"
-        bets = []
+        bets_count = 0
         agency_id = None
         try:
             while True:
@@ -53,16 +49,17 @@ class Server:
                 if agency_id is None:
                     agency_id = batch_bets[0].agency_id
                 self._ack_batch(client_socket)
-                bets.extend(batch_bets)
+                bets_count += len(batch_bets)
 
             if agency_id is None:
                 return
 
             self._quorum_barrier.wait()
 
-            for bet in self._load_bets():
-                if bet.agency_id == agency_id and self.lottery.has_won(bet):
-                    self._send_winner(client_socket, bet)
+            with self._lottery_lock:
+                for bet in self.lottery.load_bets():
+                    if bet.agency_id == agency_id and self.lottery.has_won(bet):
+                        self._send_winner(client_socket, bet)
 
             logger.info(
                 action,
@@ -70,7 +67,7 @@ class Server:
                 "agency-id",
                 agency_id,
                 "messages-amount",
-                len(bets),
+                bets_count,
             )
         except Exception as e:
             logger.error(
