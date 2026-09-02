@@ -9,7 +9,7 @@ ACK = b"OK"
 
 def encode_frame(payload: bytes) -> bytes:
     length = len(payload)
-    header = bytes([(length >> 8) & 0xFF, length & 0xFF])
+    header = length.to_bytes(HEADER_SIZE, byteorder="big")
     return header + payload
 
 
@@ -19,7 +19,7 @@ def read_frame(sock: socket.socket):
         return None
     if len(header) < HEADER_SIZE:
         raise ConnectionError("truncated message header")
-    payload_size = (header[0] << 8) | header[1]
+    payload_size = int.from_bytes(header, byteorder="big")
     payload = safe_socket.recv_all(sock, payload_size)
     if len(payload) < payload_size:
         raise ConnectionError("truncated message payload")

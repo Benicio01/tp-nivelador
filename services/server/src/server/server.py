@@ -16,7 +16,9 @@ class Server:
         self.lottery = lottery
         self.agency_quorum_min = agency_quorum_min
         self._lottery_lock = threading.Lock()
-        self._quorum_barrier = threading.Barrier(agency_quorum_min)
+        self._quorum_cond = threading.Condition()
+        self.arrived_agencies = 0
+        self._quorum_reached = False
 
     def _store_bets(self, bets):
         with self._lottery_lock:
@@ -54,7 +56,14 @@ class Server:
             if agency_id is None:
                 return
 
-            self._quorum_barrier.wait()
+            with self._quorum_cond:
+                self.arrived_agencies += 1
+                if self.arrived_agencies >= self.agency_quorum_min:
+                    self._quorum_reached = True
+                    self._quorum_cond.notify_all()
+                else:
+                    while not self._quorum_reached:
+                        self._quorum_cond.wait()
 
             with self._lottery_lock:
                 for bet in self.lottery.load_bets():
