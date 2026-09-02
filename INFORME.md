@@ -16,7 +16,7 @@ son formato del CSV y se agregan únicamente al persistir en `OUTPUT_FILE`.
 
 Definiciones menores: 2 bytes alcanzan para 64 KiB por mensaje, suficiente
 para una apuesta y con margen para los batchs del ejercicio 6 sin tocar el
-transporte. Se usa big-endian y el header se serializa y deserializa a mano (sin librerías) mediante shifts y operaciones lógicas AND/OR de bits, de forma equivalente en Go y en Python.
+transporte. Se usa big-endian y el header se serializa y deserializa a mano (sin librerías) mediante shifts en Go y usando los metodos `from_bytes()` y `to_bytes()` de Python.
 
 La sincronización queda dada íntegramente por el intercambio de mensajes —
 el cliente espera el eco de cada apuesta antes de enviar la siguiente, y el
@@ -88,3 +88,60 @@ apuestas y luego esperaba). Ahora el intercambio es request/response por batch:
    que no alcanzaron a completar un batch) y cierra su lado de escritura.
 6. El servidor calcula los ganadores y responde **un mensaje por ganador**
    y el cliente los persiste en `OUTPUT_FILE` .
+
+
+## Concurrencia (Ej 7)
+
+El servidor atiende cada conexión en su propio thread
+(`threading.Thread`), de modo que las agencias transmiten y persisten
+sus batches en paralelo.
+
+### Manejo de quorum
+
+Al terminar de enviar los batches (y recibir todos los ACK), cada agencia
+incrementa `_arrived_agencies` bajo la condición. Si con esa llegada se alcanza
+`AGENCY_QUORUM_MIN`, se marca `_quorum_reached` y se hace `notify_all`: la agencia
+que completó el mínimo pasa directo y despierta a las que estaban esperando en
+el `wait()`; las que llegan después del flag también proceden directo.
+(anteriormente se tenia una version con barrier por no entender bien la consigna del ejercicio)
+
+### Server — estado compartido y sincronización
+
+- `_lottery_lock`: protege el acceso al almacenamiento (`store_bets` / `load_bets`).
+  Los workers escriben y leen la tabla de apuestas solo bajo este lock.
+- `_quorum_cond` (`threading.Condition`): coordina la espera del quorum. Contar
+  llegadas, marcar `_quorum_reached` y avisar con `notify_all` se hace bajo la misma
+  condición.
+- `_client_sockets_lock`: protege el `set` de sockets activos, tanto al agregar como
+  al limpiar. `_close_client_sockets()` toma una copia del set con el lock y cierra
+  los sockets después de soltarlo, así no sostiene el lock durante los cierres.
+- `_shutdown` (`threading.Event`): flag que setea el handler de SIGTERM. 
+   Se usa en la condición de espera del quorum y en el loop de accept: 
+   cada agencia, cuando se despierta vuelve a mirar cuál de las dos cosas pasó (llegó el quorum o pidieron terminar) y actúa en consecuencia.
+
+
+### Client — sincronización
+
+El cliente no usa locks porque no hay estado compartido que proteger: solo
+hay una goroutine de trabajo (`client.Run`) y una de control (`main`), y se
+coordinan con canales.
+
+- `signalChan`: `signal.Notify` deja ahí la señal cuando llega.
+- `runErrChan`: la goroutine deja ahí el resultado de `Run()`.
+- `main` hace `select`: se queda esperando a que llegue **una** de las dos cosas
+  (la señal o el resultado) y recién entonces sigue.
+- Al salir por señal, `main` espera `<-runErrChan` antes de terminar: no sale
+  hasta que `Run()` terminó de limpiar (equivalente a un `join` de threads del
+  lado del server).
+- El buffer de 1 en ambos canales sirve para que el que envía no se quede
+  esperando si `main` todavía no leyó.
+
+## Graceful Shutdown (Ej 8)
+
+Tanto el servidor como el cliente terminan de forma ordenada al recibir `SIGTERM` (a traves de `docker compose down`).
+
+**Servidor:** el hilo principal registra un handler para `SIGTERM` que solo prende un flag (`_shutdown`). El loop que acepta conexiones usa un `timeout` de 1 segundo (TIMEOUT_SECONDS) para poder revisar ese flag y dejar de aceptar. Cuando se activa, cierra todos los sockets de clientes que estaban conectados y despierta a los threads que estaban esperando el quorum. Esos threads revisan el flag y se van sin intentar calcular ni enviar ganadores. Así no quedan threads colgados y todos los sockets y archivos se cierran. No se usa `exit` forzado.
+
+**Cliente:** hay dos partes coordinadas con canales: la tarea principal (leer el archivo, mandar batches y esperar ganadores) y la escucha de señales. Si llega `SIGTERM` mientras está mandando o esperando, cierra la conexión a propósito para desbloquear la lectura/escritura y espera a que la tarea principal termine de cerrar los archivos de entrada y salida antes de salir (como un `join`). Si no hay señal, termina normal cuando se cierra la conexión del lado del servidor.
+
+En ambos casos el cierre es rápido y acotado, no abrupto, y libera todos los recursos.

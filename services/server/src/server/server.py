@@ -1,3 +1,4 @@
+import signal
 import socket
 import threading
 
@@ -6,6 +7,7 @@ import protocol
 import safe_socket
 from lottery import Lottery, Bet
 
+TIMEOUT_SECONDS = 1.0
 
 class Server:
     def __init__(
@@ -17,8 +19,11 @@ class Server:
         self.agency_quorum_min = agency_quorum_min
         self._lottery_lock = threading.Lock()
         self._quorum_cond = threading.Condition()
-        self.arrived_agencies = 0
+        self._arrived_agencies = 0
         self._quorum_reached = False
+        self._shutdown = threading.Event()
+        self._client_sockets_lock = threading.Lock()
+        self._client_sockets = set()
 
     def _store_bets(self, bets):
         with self._lottery_lock:
@@ -57,13 +62,16 @@ class Server:
                 return
 
             with self._quorum_cond:
-                self.arrived_agencies += 1
-                if self.arrived_agencies >= self.agency_quorum_min:
+                self._arrived_agencies += 1
+                if self._arrived_agencies >= self.agency_quorum_min:
                     self._quorum_reached = True
                     self._quorum_cond.notify_all()
-                else:
-                    while not self._quorum_reached:
-                        self._quorum_cond.wait()
+                
+                while not self._quorum_reached and not self._shutdown.is_set():
+                    self._quorum_cond.wait()
+
+            if self._shutdown.is_set():
+                return
 
             with self._lottery_lock:
                 for bet in self.lottery.load_bets():
@@ -79,13 +87,16 @@ class Server:
                 bets_count,
             )
         except Exception as e:
-            logger.error(
-                action,
-                logger.LogResult.fail,
-                "err",
-                e,
-            )
+            if not self._shutdown.is_set():
+                logger.error(
+                    action,
+                    logger.LogResult.fail,
+                    "err",
+                    e,
+                )
         finally:
+            with self._client_sockets_lock:
+                self._client_sockets.discard(client_socket)
             client_socket.close()
 
     def _ack_batch(self, client_socket):
@@ -108,17 +119,22 @@ class Server:
 
     def run(self):
         action = "accept-connection"
+        signal.signal(signal.SIGTERM, self._signal_handler)
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
             server_socket.bind((self.server_host, self.server_port))
             server_socket.listen()
-            while True:
+            server_socket.settimeout(TIMEOUT_SECONDS)
+            
+            logger.info(action, logger.LogResult.in_progress)
+            while not self._shutdown.is_set():
                 try:
-                    logger.info(action, logger.LogResult.in_progress)
                     client_socket, _ = server_socket.accept()
-                except Exception as e:
-                    logger.error(action, logger.LogResult.fail)
-                    raise e
+                except socket.timeout:
+                    continue
                 logger.info(action, logger.LogResult.success)
+
+                with self._client_sockets_lock:
+                    self._client_sockets.add(client_socket)
 
                 worker = threading.Thread(
                     target=self._handle_client,
@@ -126,3 +142,18 @@ class Server:
                     daemon=True,
                 )
                 worker.start()
+            self._close_client_sockets()
+
+    def _close_client_sockets(self):
+        with self._client_sockets_lock:
+            sockets = list(self._client_sockets)
+        for sock in sockets:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        with self._quorum_cond:
+            self._quorum_cond.notify_all()
+
+    def _signal_handler(self, signum, frame):
+        self._shutdown.set()

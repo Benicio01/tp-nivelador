@@ -44,6 +44,10 @@ func NewClient(config ClientConfig) (*Client, error) {
 	return client, nil
 }
 
+func (client *Client) Close() error {
+	return client.conn.Close()
+}
+
 func connectToServer(host, port string) (net.Conn, error) {
 	const action = "connect-to-server"
 	var err error
@@ -116,11 +120,17 @@ func (client *Client) Run() error {
 		payload := protocol.MarshalBatch(client.config.AgencyId, batch)
 		frame := protocol.EncodeFrame(payload)
 		if err := safe_socket.SendAll(client.conn, frame); err != nil {
+			if isClosedConnError(err) {
+				return nil
+			}
 			logger.Error("send-bet", logger.Fail, messageArgs...)
 			return err
 		}
 
 		if err := client.awaitAck(); err != nil {
+			if isClosedConnError(err) {
+				return nil
+			}
 			logger.Error("await-ack", logger.Fail, messageArgs...)
 			return err
 		}
@@ -136,11 +146,17 @@ func (client *Client) Run() error {
 		payload := protocol.MarshalBatch(client.config.AgencyId, batch)
 		frame := protocol.EncodeFrame(payload)
 		if err := safe_socket.SendAll(client.conn, frame); err != nil {
+			if isClosedConnError(err) {
+				return nil
+			}
 			logger.Error("send-bet", logger.Fail, messageArgs...)
 			return err
 		}
 
 		if err := client.awaitAck(); err != nil {
+			if isClosedConnError(err) {
+				return nil
+			}
 			logger.Error("await-ack", logger.Fail, messageArgs...)
 			return err
 		}
@@ -156,6 +172,9 @@ func (client *Client) Run() error {
 			break
 		}
 		if err != nil {
+			if isClosedConnError(err) {
+				return nil
+			}
 			logger.Error("recv-winner", logger.Fail, "err", err)
 			return err
 		}
@@ -188,8 +207,15 @@ func (client *Client) closeWrite() error {
 		return fmt.Errorf("connection is not *net.TCPConn")
 	}
 	if err := tcpConn.CloseWrite(); err != nil {
+		if isClosedConnError(err) {
+			return nil
+		}
 		logger.Error("close-write", logger.Fail, "err", err)
 		return err
 	}
 	return nil
+}
+
+func isClosedConnError(err error) bool {
+	return errors.Is(err, net.ErrClosed)
 }
