@@ -58,7 +58,7 @@ de cada ganador (sin `agency_id`).
 
 ## Protocolo (Ej 6)
 
-Se agrega procesamiento por batchs (_batches_): el cliente agrupa `BATCH_SIZE`
+Se agrega procesamiento por batchs: el cliente agrupa `BATCH_SIZE`
 apuestas en un único mensaje en lugar de enviarlas una por una.
 
 ### Formato de los mensajes
@@ -92,8 +92,7 @@ apuestas y luego esperaba). Ahora el intercambio es request/response por batch:
 
 ## Concurrencia (Ej 7)
 
-El servidor atiende cada conexión en su propio thread
-(`threading.Thread`), de modo que las agencias transmiten y persisten
+El servidor atiende cada conexión en su propio thread, de modo que las agencias transmiten y persisten
 sus batches en paralelo.
 
 ### Manejo de quorum
@@ -144,4 +143,4 @@ Tanto el servidor como el cliente terminan de forma ordenada al recibir `SIGTERM
 
 **Cliente:** hay dos partes coordinadas con canales: la tarea principal (leer el archivo, mandar batches y esperar ganadores) y la escucha de señales. Si llega `SIGTERM` mientras está mandando o esperando, cierra la conexión a propósito para desbloquear la lectura/escritura y espera a que la tarea principal termine de cerrar los archivos de entrada y salida antes de salir (como un `join`). Si no hay señal, termina normal cuando se cierra la conexión del lado del servidor.
 
-En ambos casos el cierre es rápido y acotado, no abrupto, y libera todos los recursos.
+En ambos casos el cierre es rápido y libera todos los recursos.

@@ -69,18 +69,17 @@ func connectToServer(host, port string) (net.Conn, error) {
 	return conn, err
 }
 
-func (client *Client) Run() error {
-	const mainAction = "process-bets"
-	defer client.conn.Close()
+func (c *Client) Run() error {
+	defer c.conn.Close()
 
-	inputFile, err := os.Open(client.config.InputFile)
+	inputFile, err := os.Open(c.config.InputFile)
 	if err != nil {
 		logger.Error("open-input-file", logger.Fail, "err", err)
 		return err
 	}
 	defer inputFile.Close()
 
-	outputFile, err := os.Create(client.config.OutputFile)
+	outputFile, err := os.Create(c.config.OutputFile)
 	if err != nil {
 		logger.Error("open-output-file", logger.Fail, "err", err)
 		return err
@@ -88,7 +87,7 @@ func (client *Client) Run() error {
 	defer outputFile.Close()
 
 	reader := csv.NewReader(inputFile)
-	batchSize := client.config.BatchSize
+	batchSize := c.config.BatchSize
 	if batchSize <= 0 {
 		batchSize = 1
 	}
@@ -97,11 +96,10 @@ func (client *Client) Run() error {
 	messageId := 0
 	for {
 		record, err := reader.Read()
-
-		if err == io.EOF {
-			break
-		}
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
 			logger.Error("read-input-file", logger.Fail, "err", err)
 			return err
 		}
@@ -114,79 +112,70 @@ func (client *Client) Run() error {
 			continue
 		}
 
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
-		logger.Info(mainAction, logger.InProgress, messageArgs...)
-
-		payload := protocol.MarshalBatch(client.config.AgencyId, batch)
-		frame := protocol.EncodeFrame(payload)
-		if err := safe_socket.SendAll(client.conn, frame); err != nil {
+		if err := c.sendBatch(batch, messageId); err != nil {
 			if isClosedConnError(err) {
 				return nil
 			}
-			logger.Error("send-bet", logger.Fail, messageArgs...)
 			return err
 		}
-
-		if err := client.awaitAck(); err != nil {
-			if isClosedConnError(err) {
-				return nil
-			}
-			logger.Error("await-ack", logger.Fail, messageArgs...)
-			return err
-		}
-
 		batch = batch[:0]
 		messageId++
 	}
 
 	if len(batch) > 0 {
-		messageArgs := []any{"agency-id", client.config.AgencyId, "message-id", messageId, "batch-size", len(batch)}
-		logger.Info(mainAction, logger.InProgress, messageArgs...)
-
-		payload := protocol.MarshalBatch(client.config.AgencyId, batch)
-		frame := protocol.EncodeFrame(payload)
-		if err := safe_socket.SendAll(client.conn, frame); err != nil {
+		if err := c.sendBatch(batch, messageId); err != nil {
 			if isClosedConnError(err) {
 				return nil
 			}
-			logger.Error("send-bet", logger.Fail, messageArgs...)
-			return err
-		}
-
-		if err := client.awaitAck(); err != nil {
-			if isClosedConnError(err) {
-				return nil
-			}
-			logger.Error("await-ack", logger.Fail, messageArgs...)
 			return err
 		}
 	}
 
-	if err := client.closeWrite(); err != nil {
+	if err := c.closeWrite(); err != nil {
 		return err
 	}
 
-	for {
-		payload, err := protocol.ReadFrame(client.conn)
-		if errors.Is(err, io.EOF) {
-			break
+	if err := c.receiveWinners(outputFile); err != nil {
+		if isClosedConnError(err) {
+			return nil
 		}
+		return err
+	}
+	logger.Info("process-bets", logger.Success, "agency-id", c.config.AgencyId)
+	return nil
+}
+
+func (c *Client) receiveWinners(outputFile *os.File) error {
+	for {
+		payload, err := protocol.ReadFrame(c.conn)
 		if err != nil {
-			if isClosedConnError(err) {
-				return nil
+			if errors.Is(err, io.EOF) {
+				break
 			}
 			logger.Error("recv-winner", logger.Fail, "err", err)
 			return err
 		}
-
 		fields := protocol.UnmarshalBet(payload)
 		if _, err := outputFile.WriteString(strings.Join(fields[1:], ",") + "\n"); err != nil {
 			logger.Error("persist-winner", logger.Fail, "err", err)
 			return err
 		}
 	}
+	return nil
+}
 
-	logger.Info(mainAction, logger.Success, "agency-id", client.config.AgencyId)
+func (c *Client) sendBatch(batch [][]string, id int) error {
+	args := []any{"agency-id", c.config.AgencyId, "message-id", id, "batch-size", len(batch)}
+	logger.Info("process-bets", logger.InProgress, args...)
+	frame := protocol.EncodeFrame(protocol.MarshalBatch(c.config.AgencyId, batch))
+	if err := safe_socket.SendAll(c.conn, frame); err != nil {
+		logger.Error("send-bet", logger.Fail, args...)
+		return err
+	}
+	if err := c.awaitAck(); err != nil {
+		logger.Error("await-ack", logger.Fail, args...)
+		return err
+	}
 	return nil
 }
 
